@@ -185,18 +185,23 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
         timestampIso: outcome.error.timestampIso,
         status: 'BLOCKED',
         outputLines: Object.freeze([
-          `[SECURITY POLICY BLOCK] ${outcome.error.title}`,
+          `[REJECTED — ${outcome.error.domain}] ${outcome.error.title}`,
           `Reason      : ${outcome.error.message}`,
           `Remediation : ${outcome.error.remediation}`,
         ]),
         errorCode: outcome.error.code,
+        errorDomain: outcome.error.domain,
       });
 
       const isTraversal =
-        outcome.error.code === 'ERR_CWE22_PATH_TRAVERSAL';
+        outcome.error.code === ErrorCode.PathTraversalBlocked;
 
       return Object.freeze({
         ...state,
+        tlsSession: Object.freeze({
+          ...state.tlsSession,
+          securityBlocks: state.tlsSession.securityBlocks + 1,
+        }),
         sandboxFs: isTraversal
           ? Object.freeze({
               ...state.sandboxFs,
@@ -225,9 +230,15 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           sandboxFs: res.value,
         });
       }
-      const isTraversal = res.error.code === 'ERR_CWE22_PATH_TRAVERSAL';
+      const isTraversal = res.error.code === ErrorCode.PathTraversalBlocked;
       return Object.freeze({
         ...state,
+        tlsSession: isTraversal
+          ? Object.freeze({
+              ...state.tlsSession,
+              securityBlocks: state.tlsSession.securityBlocks + 1,
+            })
+          : state.tlsSession,
         sandboxFs: isTraversal
           ? Object.freeze({
               ...state.sandboxFs,

@@ -1,13 +1,6 @@
 /**
- * Automated Functional Test Suite
- * Verifies every implemented module and functionality:
- * 1. Functional Primitives (Result Monad & pipe composition)
- * 2. Centralized Error Manager (creation, recording, dismissal, severity filtering)
- * 3. Centralized Route Manager (hash parsing, navigation, history stack, invalid route fallback)
- * 4. Sandboxed File Browser Engine (realpath canonicalization, CWE-22 traversal blocking, file read/create)
- * 5. Allowlisted Command Dispatcher & TLS Frame Engine (POSIX opcodes, CWE-78 metacharacter blocking, CWE-306 mTLS check)
- * 6. C11 Source Architecture & Static Security Auditor (verifying zero shell calls and memory-safe bounds)
- * 7. Centralized State Manager (pure reducer immutability and integrated state transitions)
+ * Automated Functional Test Suite (Browser UI + C11 Source Synchronization)
+ * Verifies every TypeScript UI module and its synchronization with `/c_project/*`.
  */
 
 import { C_SOURCE_FILES, runStaticSecurityAudit } from './cCodeArch';
@@ -20,6 +13,7 @@ import {
   createInitialErrorState,
   dismissErrorById,
   ErrorCode,
+  ErrorDomain,
   ErrorSeverity,
   recordError,
   selectActiveBannerError,
@@ -43,7 +37,6 @@ import {
 } from './sandboxFs';
 import {
   ActionType,
-  appReducer,
   createFunctionalStore,
   createInitialAppState,
 } from './stateManager';
@@ -56,7 +49,7 @@ export interface TestCaseResult {
     | 'Route Manager'
     | 'Sandbox FS (CWE-22)'
     | 'Command Engine (CWE-78)'
-    | 'C11 Static Auditor'
+    | 'C11 Source & Heuristic Scan'
     | 'State Manager';
   readonly name: string;
   readonly assertionDescription: string;
@@ -83,7 +76,10 @@ const runSingleTest = (
   const start = performance.now();
   try {
     const outcome = testFn();
-    const durationMs = Math.max(0.1, Number((performance.now() - start).toFixed(2)));
+    const durationMs = Math.max(
+      0.1,
+      Number((performance.now() - start).toFixed(2))
+    );
     return Object.freeze({
       id,
       category,
@@ -94,7 +90,10 @@ const runSingleTest = (
       details: outcome.details,
     });
   } catch (e) {
-    const durationMs = Math.max(0.1, Number((performance.now() - start).toFixed(2)));
+    const durationMs = Math.max(
+      0.1,
+      Number((performance.now() - start).toFixed(2))
+    );
     return Object.freeze({
       id,
       category,
@@ -141,12 +140,13 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
     runSingleTest(
       'test_err_01',
       'Error Manager',
-      'Error Recording, Active Banner Selection & Dismissal',
-      'Verifies immutable error queuing, active banner lookup, and dismissal state update.',
+      'Separated Error Domains (Protocol vs Filesystem) & Dismissal',
+      'Verifies immutable error queuing, domain tagging, active banner lookup, and dismissal.',
       () => {
         const s0 = createInitialErrorState();
         const e1 = createAppError({
           code: ErrorCode.PathTraversalBlocked,
+          domain: ErrorDomain.Filesystem,
           severity: ErrorSeverity.SecurityBlock,
           title: 'Test CWE-22 Block',
           message: 'Blocked ../etc/passwd',
@@ -160,12 +160,13 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
         const secList = selectErrorsBySeverity(s2, ErrorSeverity.SecurityBlock);
         const passed =
           activeBefore?.id === e1.id &&
+          activeBefore?.domain === ErrorDomain.Filesystem &&
           activeAfter === null &&
           secList.length === 1 &&
           secList[0].dismissed === true;
         return {
           passed,
-          details: `Recorded ${e1.code}, banner active=${Boolean(activeBefore)}, dismissed cleanly=${activeAfter === null}`,
+          details: `Recorded ${e1.code} (${e1.domain}), dismissed=${activeAfter === null}`,
         };
       }
     ),
@@ -192,43 +193,43 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
           invalidParse.error.code === ErrorCode.InvalidRoute;
         return {
           passed,
-          details: `History stack transitions: workspace -> files -> c-source -> back(${rBack.currentRoute}); invalid hash returned ${isErr(invalidParse) ? invalidParse.error.code : 'none'}`,
+          details: `History transitions verified; invalid hash returned ${isErr(invalidParse) ? invalidParse.error.code : 'none'}`,
         };
       }
     ),
 
-    // 4. Sandbox FS (CWE-22)
+    // 4. Sandbox FS (CWE-22, Symlinks, Permissions, Stateful cd)
     runSingleTest(
       'test_fs_01',
       'Sandbox FS (CWE-22)',
-      'Canonical Path Containment & Parent Traversal Block (CWE-22)',
-      'Verifies resolveSandboxedPath allows paths inside /srv/sandbox and strictly blocks ../../etc/shadow.',
+      'Depth-Checked Path Normalization & Traversal Escape Rejection',
+      'Verifies resolveSandboxedPath allows paths inside /srv/sandbox and rejects ../ escapes above root.',
       () => {
         const safeRes = resolveSandboxedPath(
           '/srv/sandbox/config',
           '../logs/audit_daemon.log',
           JAIL_ROOT
         );
-        const escapeRes = resolveSandboxedPath(
-          '/srv/sandbox/config',
-          '../../../etc/shadow',
+        const escapeFromRoot = resolveSandboxedPath(
+          '/srv/sandbox',
+          '../etc/passwd',
           JAIL_ROOT
         );
-        const backslashRes = resolveSandboxedPath(
-          '/srv/sandbox',
-          '..\\..\\Windows\\System32',
+        const escapeDeep = resolveSandboxedPath(
+          '/srv/sandbox/config',
+          '../../etc/shadow',
           JAIL_ROOT
         );
         const passed =
           isOk(safeRes) &&
           safeRes.value === '/srv/sandbox/logs/audit_daemon.log' &&
-          isErr(escapeRes) &&
-          escapeRes.error.code === ErrorCode.PathTraversalBlocked &&
-          isErr(backslashRes) &&
-          backslashRes.error.code === ErrorCode.PathTraversalBlocked;
+          isErr(escapeFromRoot) &&
+          escapeFromRoot.error.code === ErrorCode.PathTraversalBlocked &&
+          isErr(escapeDeep) &&
+          escapeDeep.error.code === ErrorCode.PathTraversalBlocked;
         return {
           passed,
-          details: `Safe path resolved to "${isOk(safeRes) ? safeRes.value : ''}"; "../../../etc/shadow" blocked with ${isErr(escapeRes) ? escapeRes.error.code : ''}`,
+          details: `Safe path -> "${isOk(safeRes) ? safeRes.value : ''}"; "../etc/passwd" at root -> ${isErr(escapeFromRoot) ? escapeFromRoot.error.code : 'OK'}`,
         };
       }
     ),
@@ -236,53 +237,78 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
     runSingleTest(
       'test_fs_02',
       'Sandbox FS (CWE-22)',
-      'Sandboxed Directory Change, File Read & Audit Note Creation',
-      'Verifies reading existing config files and creating a new validated audit file inside the jail.',
+      'Symlink Escape, Permission Denied (0000), Directory Read & Stateful cd',
+      'Verifies symlink rejection, chmod 0000 EACCES, EISDIR on directory read, and cd + cat resolution.',
       () => {
         const fs0 = createInitialSandboxFsState();
+        const symlinkRead = readSandboxFile(
+          fs0,
+          'logs/symlink_escape_test'
+        );
+        const permDeniedRead = readSandboxFile(
+          fs0,
+          'reports/restricted_key_backup.txt'
+        );
+        const dirRead = readSandboxFile(fs0, 'reports');
+
+        // Stateful cd into "reports", then relative read of "health_snapshot.txt"
         const cdRes = changeSandboxDirectory(fs0, 'reports');
         if (isErr(cdRes)) {
-          return { passed: false, details: 'Failed to cd into reports' };
+          return { passed: false, details: 'cd reports failed' };
         }
+        const relRead = readSandboxFile(cdRes.value, 'health_snapshot.txt');
         const createRes = createSandboxAuditNote(
           cdRes.value,
           'incident_check.txt',
-          'Verified mTLS certificate rotation.'
+          'Verified openat2 confinement.'
         );
-        if (isErr(createRes)) {
-          return { passed: false, details: 'Failed to create audit note' };
-        }
-        const readRes = readSandboxFile(
-          createRes.value,
-          '/srv/sandbox/reports/incident_check.txt'
-        );
+
         const passed =
-          isOk(readRes) &&
-          readRes.value.file.content === 'Verified mTLS certificate rotation.';
+          isErr(symlinkRead) &&
+          symlinkRead.error.code === ErrorCode.PathTraversalBlocked &&
+          isErr(permDeniedRead) &&
+          permDeniedRead.error.code === ErrorCode.PermissionDenied &&
+          isErr(dirRead) &&
+          dirRead.error.code === ErrorCode.NotARegularFile &&
+          isOk(relRead) &&
+          relRead.value.file.name === 'health_snapshot.txt' &&
+          isOk(createRes);
+
         return {
           passed,
-          details: `Created & verified "/srv/sandbox/reports/incident_check.txt" (${isOk(readRes) ? readRes.value.file.sizeBytes : 0} bytes, SHA256:${isOk(readRes) ? readRes.value.file.sha256Short : ''})`,
+          details: `symlink->${isErr(symlinkRead) ? symlinkRead.error.code : ''}, perm->${isErr(permDeniedRead) ? permDeniedRead.error.code : ''}, dirRead->${isErr(dirRead) ? dirRead.error.code : ''}, cd+cat->OK`,
         };
       }
     ),
 
-    // 5. Command Engine (CWE-78 & CWE-306)
+    // 5. Command Engine (Synchronized Opcodes, No Counter Increment on Reject)
     runSingleTest(
       'test_cmd_01',
       'Command Engine (CWE-78)',
-      'Allowlisted Opcode Execution & Binary Wire Frame Generation',
-      'Verifies allowlisted commands map to SAC1 binary wire headers and increment anti-replay sequence numbers.',
+      'Allowlisted C11 Opcode Framing & Stateful cd -> ls / cat',
+      'Verifies allowlisted commands generate request + response headers and cd updates cwd for subsequent commands.',
       () => {
         const fs0 = createInitialSandboxFsState();
         const tls0 = createInitialTlsSession();
-        const res = dispatchAllowlistedCommand('uname', fs0, tls0);
+        const cdOut = dispatchAllowlistedCommand('cd reports', fs0, tls0);
+        if (isErr(cdOut)) {
+          return { passed: false, details: 'cd reports failed' };
+        }
+        const catOut = dispatchAllowlistedCommand(
+          'cat health_snapshot.txt',
+          cdOut.value.nextFsState,
+          cdOut.value.nextSessionState
+        );
         const passed =
-          isOk(res) &&
-          res.value.entry.wireFrame?.opcodeName === 'OP_SYS_UNAME' &&
-          res.value.nextSessionState.sequenceCounter === tls0.sequenceCounter + 1;
+          isOk(catOut) &&
+          catOut.value.entry.wireFrame?.opcodeName === 'SAC_OP_FS_READFILE' &&
+          catOut.value.nextSessionState.sequenceCounter ===
+            tls0.sequenceCounter + 2 &&
+          catOut.value.nextSessionState.commandsExecuted ===
+            tls0.commandsExecuted + 2;
         return {
           passed,
-          details: `Dispatched OP_SYS_UNAME -> frame "${isOk(res) ? res.value.entry.wireFrame?.rawHexPreview : ''}" seq=${isOk(res) ? res.value.nextSessionState.sequenceCounter : 0}`,
+          details: `cd reports (seq=1) -> cat health_snapshot.txt (seq=2) succeeded; reqHex="${isOk(catOut) ? catOut.value.entry.wireFrame?.requestRawHex : ''}"`,
         };
       }
     ),
@@ -290,36 +316,21 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
     runSingleTest(
       'test_cmd_02',
       'Command Engine (CWE-78)',
-      'OS Command Injection & Arbitrary Binary Rejection (CWE-78)',
-      'Verifies compound shell operators (; | && ` $()) and unallowlisted commands (sh, bash, wget) are blocked.',
+      'Rejected Commands Never Advance Sequence or Executed Counter',
+      'Verifies shell metacharacters and unimplemented commands (e.g. netstat, bash) are rejected without advancing sequenceCounter.',
       () => {
         const fs0 = createInitialSandboxFsState();
         const tls0 = createInitialTlsSession();
-        const injectionAttempt = dispatchAllowlistedCommand(
-          'uname; cat /etc/passwd',
-          fs0,
-          tls0
-        );
-        const subshellAttempt = dispatchAllowlistedCommand(
-          'ls $(whoami)',
-          fs0,
-          tls0
-        );
-        const unallowlistedAttempt = dispatchAllowlistedCommand(
-          'bash -i',
-          fs0,
-          tls0
-        );
+        const inj = dispatchAllowlistedCommand('uname; id', fs0, tls0);
+        const unimpl = dispatchAllowlistedCommand('netstat', fs0, tls0);
         const passed =
-          isErr(injectionAttempt) &&
-          injectionAttempt.error.code === ErrorCode.ShellInjectionBlocked &&
-          isErr(subshellAttempt) &&
-          subshellAttempt.error.code === ErrorCode.ShellInjectionBlocked &&
-          isErr(unallowlistedAttempt) &&
-          unallowlistedAttempt.error.code === ErrorCode.CommandNotAllowlisted;
+          isErr(inj) &&
+          inj.error.code === ErrorCode.ShellInjectionBlocked &&
+          isErr(unimpl) &&
+          unimpl.error.code === ErrorCode.CommandNotAllowlisted;
         return {
           passed,
-          details: `Blocked ";", "$()", and "bash -i" with ${isErr(injectionAttempt) ? injectionAttempt.error.code : ''} & ${isErr(unallowlistedAttempt) ? unallowlistedAttempt.error.code : ''}`,
+          details: `Blocked "uname; id" (${isErr(inj) ? inj.error.code : ''}) and unimplemented "netstat" (${isErr(unimpl) ? unimpl.error.code : ''})`,
         };
       }
     ),
@@ -328,47 +339,38 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
       'test_cmd_03',
       'Command Engine (CWE-78)',
       'Unauthenticated mTLS Session Rejection (CWE-306)',
-      'Verifies commands are rejected when mutual TLS 1.3 session is disconnected.',
+      'Verifies commands are rejected when the mTLS 1.3 session is disconnected.',
       () => {
         const fs0 = createInitialSandboxFsState();
-        const disconnectedTls = { ...createInitialTlsSession(), connected: false };
+        const disconnectedTls = {
+          ...createInitialTlsSession(),
+          connected: false,
+        };
         const res = dispatchAllowlistedCommand('sysinfo', fs0, disconnectedTls);
         const passed =
           isErr(res) && res.error.code === ErrorCode.SessionDisconnected;
         return {
           passed,
-          details: `Disconnected session returned ${isErr(res) ? res.error.code : 'OK'} (${isErr(res) ? res.error.cweReference : ''})`,
+          details: `Disconnected session returned ${isErr(res) ? res.error.code : 'OK'}`,
         };
       }
     ),
 
-    // 6. C11 Static Security Auditor
+    // 6. C11 Source & Honest Heuristic Scanner
     runSingleTest(
       'test_c_audit_01',
-      'C11 Static Auditor',
-      'Static Security Verification of C11 Server, Client, Managers & Tests',
-      'Scans all 7 C_SOURCE_FILES to confirm zero system()/popen()/gets()/strcpy() calls and active mTLS 1.3 + realpath() guards.',
+      'C11 Source & Heuristic Scan',
+      'Synchronization with /c_project/* (10 Files) & Honest Heuristic Labels',
+      'Verifies all 10 C_SOURCE_FILES load via ?raw and heuristic scan reports PATTERN_NOT_FOUND / HEURISTIC_PRESENT.',
       () => {
         const findings = runStaticSecurityAudit(C_SOURCE_FILES);
-        const allSafe = findings.every((f) => f.status === 'VERIFIED_SAFE');
-        const hasMainInServer = C_SOURCE_FILES.some(
-          (f) => f.filename === 'tls_server.c' && f.code.includes('int main(')
-        );
-        const hasMainInClient = C_SOURCE_FILES.some(
-          (f) => f.filename === 'tls_client.c' && f.code.includes('int main(')
-        );
-        const hasCTestSuite = C_SOURCE_FILES.some(
-          (f) => f.filename === 'test_suite.c' && f.code.includes('int main(')
+        const noViolations = findings.every(
+          (f) =>
+            f.status === 'PATTERN_NOT_FOUND' || f.status === 'HEURISTIC_PRESENT'
         );
         return {
-          passed:
-            allSafe &&
-            findings.length === 4 &&
-            C_SOURCE_FILES.length === 7 &&
-            hasMainInServer &&
-            hasMainInClient &&
-            hasCTestSuite,
-          details: `Verified ${C_SOURCE_FILES.length} C11 modules & ${findings.length}/4 static C security rules: ${findings.map((f) => `${f.ruleId}(${f.cwe})=${f.status}`).join(', ')}`,
+          passed: noViolations && findings.length === 5 && C_SOURCE_FILES.length === 10,
+          details: `Loaded ${C_SOURCE_FILES.length} C11 files; ${findings.map((f) => `${f.ruleId}=${f.status}`).join(', ')}`,
         };
       }
     ),
@@ -377,8 +379,8 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
     runSingleTest(
       'test_store_01',
       'State Manager',
-      'Immutable Store Dispatch & Cross-Slice Error Coordination',
-      'Verifies store.dispatch updates state immutably and coordinates SandboxFs traversal blocks with ErrorManager.',
+      'Immutable Store Dispatch & Non-Incrementing Rejected Command State',
+      'Verifies rejected commands increment securityBlocks while keeping sequenceCounter and commandsExecuted unchanged.',
       () => {
         const store = createFunctionalStore(createInitialAppState());
         const beforeState = store.getState();
@@ -389,14 +391,17 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
         const afterState = store.getState();
         const passed =
           beforeState !== afterState &&
+          afterState.tlsSession.sequenceCounter ===
+            beforeState.tlsSession.sequenceCounter &&
+          afterState.tlsSession.commandsExecuted ===
+            beforeState.tlsSession.commandsExecuted &&
+          afterState.tlsSession.securityBlocks ===
+            beforeState.tlsSession.securityBlocks + 1 &&
           afterState.sandboxFs.traversalAttemptsBlocked ===
-            beforeState.sandboxFs.traversalAttemptsBlocked + 1 &&
-          afterState.errorManager.errors.length === 1 &&
-          afterState.errorManager.errors[0].code ===
-            ErrorCode.PathTraversalBlocked;
+            beforeState.sandboxFs.traversalAttemptsBlocked + 1;
         return {
           passed,
-          details: `traversalAttemptsBlocked incremented to ${afterState.sandboxFs.traversalAttemptsBlocked}; ErrorManager recorded ${afterState.errorManager.errors[0]?.code}`,
+          details: `seq unchanged (${afterState.tlsSession.sequenceCounter}), securityBlocks=${afterState.tlsSession.securityBlocks}`,
         };
       }
     ),

@@ -4,6 +4,7 @@ import {
   FilePlus2,
   FileText,
   Folder,
+  Link2,
   Search,
   ShieldAlert,
 } from 'lucide-react';
@@ -48,7 +49,7 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
       filename: newFileName,
       content:
         newFileContent.trim() ||
-        `Audit log note created in ${sandboxFs.currentDir} at ${new Date().toISOString()}`,
+        `Simulated audit note created in ${sandboxFs.currentDir} at ${new Date().toISOString()}`,
     });
     setNewFileName('');
     setNewFileContent('');
@@ -69,18 +70,30 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
       {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 border-b border-slate-800 pb-6">
         <div className="space-y-2 max-w-2xl">
-          <p className="text-xs text-emerald-400 font-medium">
-            02. Sandboxed Remote File System Browser
-          </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-amber-300 font-semibold">
+              SIMULATED IN-MEMORY VFS
+            </span>
+            <span aria-hidden="true" className="text-slate-600">
+              ·
+            </span>
+            <span className="text-slate-400">
+              Models <code className="text-slate-200">c_project/sandbox_fs.c</code>{' '}
+              (<code className="text-slate-200">openat2 RESOLVE_BENEATH</code> +{' '}
+              <code className="text-slate-200">openat O_NOFOLLOW</code> fallback)
+            </span>
+          </div>
           <h1 className="text-2xl sm:text-3xl font-semibold text-slate-100 tracking-tight">
-            Canonical <code className="text-xl sm:text-2xl">realpath()</code> &{' '}
-            <code className="text-xl sm:text-2xl">O_NOFOLLOW</code> Jail
+            Confined Directory Descriptor &amp; Symlink Guard
           </h1>
           <p className="text-sm text-slate-400 leading-relaxed">
-            Every directory listing and file read resolves canonical paths via{' '}
-            <code className="text-slate-200">realpath()</code> and verifies strict
-            containment within <code className="text-emerald-400">{JAIL_ROOT}</code>{' '}
-            before invoking <code className="text-slate-200">openat(..., O_NOFOLLOW)</code>.
+            In the real C11 server (<code className="text-slate-200">sandbox_fs.c</code>),
+            confinement is anchored to an open <code className="text-slate-200">jail_dirfd</code>{' '}
+            using Linux <code className="text-emerald-400">openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)</code>{' '}
+            (with a documented stepwise <code className="text-slate-200">openat(O_NOFOLLOW)</code>{' '}
+            fallback when <code className="text-slate-200">openat2</code> is unavailable),
+            rather than relying on a TOCTOU-prone{' '}
+            <code className="text-slate-200">realpath() + open()</code> pair.
           </p>
         </div>
 
@@ -95,26 +108,27 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
         </div>
       </div>
 
-      {/* Interactive Path Resolution & CWE-22 Test Bar */}
+      {/* Interactive Path Resolution & Granular Error Test Bar */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
         <form
           onSubmit={handleCustomPathTest}
-          className="lg:col-span-8 flex flex-col sm:flex-row gap-2"
+          className="lg:col-span-7 flex flex-col sm:flex-row gap-2"
         >
           <div className="flex-1">
             <label
               htmlFor="custom-path-input"
               className="block text-xs font-medium text-slate-300 mb-1.5"
             >
-              Test Canonical Path Resolution (Try relative path or{' '}
-              <code className="text-amber-300">../../etc/passwd</code> to trigger CWE-22 guard)
+              Test Relative / Jail Path Resolution (Try{' '}
+              <code className="text-emerald-400">reports</code> or{' '}
+              <code className="text-amber-300">../../etc/passwd</code>)
             </label>
             <input
               id="custom-path-input"
               type="text"
               value={customPathInput}
               onChange={(e) => setCustomPathInput(e.target.value)}
-              placeholder="e.g. /srv/sandbox/logs or ../../etc/shadow"
+              placeholder="e.g. reports or ../../etc/shadow"
               className="w-full min-h-[44px] px-3.5 py-2 bg-slate-900 border border-slate-800 rounded-lg text-sm font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-400"
             />
           </div>
@@ -122,11 +136,11 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
             type="submit"
             className="min-h-[44px] sm:self-end px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap cursor-pointer"
           >
-            Resolve &amp; Chdir
+            Chdir (SAC_OP_FS_CHDIR)
           </button>
         </form>
 
-        <div className="lg:col-span-4 flex items-center gap-2">
+        <div className="lg:col-span-5 grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button
             type="button"
             onClick={() =>
@@ -135,10 +149,23 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
                 targetPath: '../../../etc/shadow',
               })
             }
-            className="w-full min-h-[44px] px-3.5 py-2 bg-slate-900 hover:bg-red-950/50 border border-slate-800 hover:border-red-800/70 text-amber-300 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+            className="min-h-[44px] px-3 py-2 bg-slate-900 hover:bg-red-950/50 border border-slate-800 hover:border-red-800/70 text-amber-300 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
           >
             <ShieldAlert className="w-4 h-4 shrink-0" />
-            <span>Simulate CWE-22 Traversal Attack</span>
+            <span>Test ../ Escape</span>
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              dispatch({
+                type: ActionType.SelectFile,
+                targetPath: '/srv/sandbox/logs/symlink_escape_test',
+              })
+            }
+            className="min-h-[44px] px-3 py-2 bg-slate-900 hover:bg-red-950/50 border border-slate-800 hover:border-red-800/70 text-amber-300 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+          >
+            <Link2 className="w-4 h-4 shrink-0" />
+            <span>Test Symlink Block</span>
           </button>
         </div>
       </div>
@@ -158,10 +185,10 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
                   className="min-h-[40px] px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:pointer-events-none text-xs font-medium text-slate-200 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <ArrowUpLeft className="w-4 h-4" />
-                  <span>Up</span>
+                  <span>Up (..)</span>
                 </button>
                 <span className="font-mono text-xs sm:text-sm text-emerald-400 font-semibold truncate">
-                  {sandboxFs.currentDir}
+                  cwd: {sandboxFs.currentDir}
                 </span>
               </div>
 
@@ -234,12 +261,17 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
                             <div className="flex items-center gap-2.5">
                               {node.type === FsNodeType.Directory ? (
                                 <Folder className="w-4 h-4 text-emerald-400 shrink-0" />
+                              ) : node.type === FsNodeType.Symlink ? (
+                                <Link2 className="w-4 h-4 text-amber-400 shrink-0" />
                               ) : (
                                 <FileText className="w-4 h-4 text-slate-400 shrink-0" />
                               )}
                               <span className="font-semibold truncate">
                                 {node.name}
                                 {node.type === FsNodeType.Directory ? '/' : ''}
+                                {node.type === FsNodeType.Symlink
+                                  ? ` -> ${node.symlinkTarget}`
+                                  : ''}
                               </span>
                             </div>
                           </td>
@@ -261,17 +293,18 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
             </div>
           </div>
 
-          {/* Create Sandboxed Audit Note Form */}
+          {/* Create Simulated Note in In-Memory UI VFS */}
           <form
             onSubmit={handleCreateNote}
             className="border border-slate-800 rounded-xl bg-slate-900/60 p-4 space-y-3"
           >
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-200">
-                Write Sandboxed Audit Note in {sandboxFs.currentDir}
+                Add Simulated Test File in {sandboxFs.currentDir} (Browser
+                Memory Only)
               </span>
-              <span className="text-[11px] font-mono text-slate-400">
-                O_CREAT | O_WRONLY | O_NOFOLLOW
+              <span className="text-[11px] font-mono text-amber-300">
+                UI VFS Simulator
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -297,7 +330,7 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
               className="min-h-[42px] px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
             >
               <FilePlus2 className="w-4 h-4" />
-              <span>Create Sandboxed File</span>
+              <span>Add File to Simulated VFS</span>
             </button>
           </form>
         </div>
@@ -307,7 +340,7 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
           <div className="border border-slate-800 rounded-xl bg-slate-900/60 p-5 space-y-4">
             <div className="space-y-1 border-b border-slate-800 pb-3">
               <p className="text-xs text-emerald-400 font-medium">
-                POSIX File Descriptor Inspector
+                Regular File Inspector (SAC_OP_FS_READFILE)
               </p>
               <h2 className="text-lg font-semibold text-slate-100 font-mono truncate">
                 {selectedFile ? selectedFile.name : 'No File Selected'}
@@ -318,7 +351,7 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
                   <span aria-hidden="true">·</span>
                   <span>{selectedFile.sizeBytes} B</span>
                   <span aria-hidden="true">·</span>
-                  <span>SHA256:{selectedFile.sha256Short}</span>
+                  <span>FNV1a-64 (non-crypto): {selectedFile.fnv1a64Hex}</span>
                 </div>
               )}
             </div>
@@ -329,8 +362,8 @@ export const SandboxFileView: React.FC<SandboxFileViewProps> = ({
               </pre>
             ) : (
               <p className="text-xs text-slate-400 py-8 text-center">
-                Select a file row in the directory table to inspect its verified
-                contents and digest.
+                Select a regular file row in the directory table to inspect its
+                contents.
               </p>
             )}
           </div>

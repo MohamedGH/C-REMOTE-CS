@@ -22,32 +22,32 @@ const ALLOWLIST_PRESETS: ReadonlyArray<{
   {
     label: 'Kernel Identity (uname)',
     command: 'uname',
-    description: 'OP_SYS_UNAME (0x02) -> POSIX uname(&uts)',
+    description: 'SAC_OP_SYS_UNAME (0x02) -> POSIX uname(&uts)',
   },
   {
     label: 'System Load (sysinfo)',
     command: 'sysinfo',
-    description: 'OP_SYS_UPTIME (0x01) -> POSIX sysinfo(&si)',
+    description: 'SAC_OP_SYS_UPTIME (0x01) -> POSIX sysinfo(&si)',
   },
   {
-    label: 'Volume Free (statvfs)',
+    label: 'Volume Free (df)',
     command: 'df',
-    description: 'OP_SYS_STATVFS (0x03) -> POSIX statvfs()',
+    description: 'SAC_OP_SYS_STATVFS (0x03) -> POSIX fstatvfs(jail_dirfd)',
   },
   {
-    label: 'Interfaces (getifaddrs)',
-    command: 'netstat',
-    description: 'OP_SYS_NETIF (0x04) -> POSIX getifaddrs()',
+    label: 'Change Dir (cd reports)',
+    command: 'cd reports',
+    description: 'SAC_OP_FS_CHDIR (0x12) -> updates session cwd_rel',
   },
   {
-    label: 'List Sandbox (openat)',
-    command: 'ls /srv/sandbox/config',
-    description: 'OP_FS_LISTDIR (0x10) -> openat(O_NOFOLLOW)',
+    label: 'List Current Dir (ls .)',
+    command: 'ls .',
+    description: 'SAC_OP_FS_LISTDIR (0x10) -> openat2(RESOLVE_BENEATH)',
   },
   {
-    label: 'Read Policy (openat)',
-    command: 'cat /srv/sandbox/config/tls_policy.conf',
-    description: 'OP_FS_READFILE (0x11) -> openat(O_RDONLY)',
+    label: 'Read File (cat)',
+    command: 'cat config/tls_policy.conf',
+    description: 'SAC_OP_FS_READFILE (0x11) -> openat2(O_RDONLY)',
   },
 ];
 
@@ -62,9 +62,9 @@ const SECURITY_TEST_PAYLOADS: ReadonlyArray<{
     cwe: 'CWE-78',
   },
   {
-    label: 'Test CWE-78 Subshell ($())',
-    command: 'ls $(id)',
-    cwe: 'CWE-78',
+    label: 'Test Unimplemented Opcode',
+    command: 'netstat',
+    cwe: 'SAC_ERR_BAD_OPCODE',
   },
   {
     label: 'Test CWE-22 Path Escape (..)',
@@ -102,35 +102,53 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
 
   return (
     <div className="space-y-8">
-      {/* Section Header & Session Metadata (Unboxed Typography, Zero-Pill Discipline) */}
+      {/* Section Header & Explicit Simulation Notice */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 border-b border-slate-800 pb-6">
         <div className="space-y-2 max-w-2xl">
-          <p className="text-xs text-emerald-400 font-medium">
-            01. Mutual TLS 1.3 Remote Administration Console
-          </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-amber-300 font-semibold">
+              SIMULATED IN-BROWSER UI DEMONSTRATOR
+            </span>
+            <span aria-hidden="true" className="text-slate-600">
+              ·
+            </span>
+            <span className="text-slate-400">
+              Synchronized with 6 real C11 opcodes in{' '}
+              <code className="text-slate-200">c_project/protocol.h</code>
+            </span>
+          </div>
           <h1 className="text-2xl sm:text-3xl font-semibold text-slate-100 tracking-tight">
-            Allowlisted POSIX Syscall Dispatcher
+            Allowlisted POSIX Syscall &amp; Framing Simulator
           </h1>
           <p className="text-sm text-slate-400 leading-relaxed">
-            Executes remote diagnostics and sandboxed file queries using packed
-            C11 binary opcodes (<code className="text-slate-200">sac_opcode_t</code>)
-            over OpenSSL TLS 1.3. Zero shell interpreters (<code className="text-slate-200">system()</code> /{' '}
-            <code className="text-slate-200">popen()</code>) are compiled into the server binary.
+            Simulates how <code className="text-slate-200">c_project/managers.c</code>{' '}
+            and <code className="text-slate-200">c_project/io_framing.c</code>{' '}
+            validate headers before dispatch, frame 12-byte requests and 16-byte
+            responses, and maintain stateful relative <code className="text-slate-200">cwd_rel</code>{' '}
+            across <code className="text-slate-200">cd</code>,{' '}
+            <code className="text-slate-200">ls</code>, and{' '}
+            <code className="text-slate-200">cat</code>.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
-          <span className={tlsSession.connected ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
-            {tlsSession.connected ? 'Session Established' : 'Session Disconnected'}
+          <span
+            className={
+              tlsSession.connected
+                ? 'text-emerald-400 font-semibold'
+                : 'text-amber-400 font-semibold'
+            }
+          >
+            {tlsSession.connected
+              ? 'Simulated mTLS 1.3 Active'
+              : 'Simulated Session Disconnected'}
           </span>
-          <span aria-hidden="true">·</span>
-          <span>
-            {tlsSession.remoteHost}:{tlsSession.remotePort}
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>{tlsSession.protocolVersion}</span>
           <span aria-hidden="true">·</span>
           <span>Seq #{tlsSession.sequenceCounter}</span>
+          <span aria-hidden="true">·</span>
+          <span>Executed: {tlsSession.commandsExecuted}</span>
+          <span aria-hidden="true">·</span>
+          <span>Blocked: {tlsSession.securityBlocks}</span>
         </div>
       </div>
 
@@ -138,13 +156,12 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left 7 Columns: Interactive RPC Terminal & Presets */}
         <div className="lg:col-span-7 space-y-6">
-          {/* Interactive Command Form */}
           <form onSubmit={handleSubmit} className="space-y-3">
             <label
               htmlFor="rpc-command-input"
               className="block text-xs font-medium text-slate-300"
             >
-              Dispatch Remote Opcode (Working Dir:{' '}
+              Dispatch Simulated Opcode (Session Working Dir:{' '}
               <span className="font-mono text-emerald-400">
                 {sandboxFs.currentDir}
               </span>
@@ -157,7 +174,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                   type="text"
                   value={inputCmd}
                   onChange={(e) => setInputCmd(e.target.value)}
-                  placeholder="Enter allowlisted command (e.g., sysinfo, uname, df, ls, cat config/tls_policy.conf)"
+                  placeholder="Enter C11 opcode command (sysinfo, uname, df, cd reports, ls ., cat health_snapshot.txt)"
                   className="w-full min-h-[44px] px-4 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-sm font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-400"
                 />
               </div>
@@ -166,15 +183,17 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                 className="min-h-[44px] px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Play className="w-4 h-4" />
-                <span>Send TLS Frame</span>
+                <span>Send Simulated Frame</span>
               </button>
             </div>
           </form>
 
-          {/* Allowlisted Quick Actions */}
+          {/* Allowlisted Quick Actions (Exact 6 C11 Opcodes) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs text-slate-400">
-              <span>Allowlisted POSIX Telemetry Opcodes</span>
+              <span>
+                The 6 Opcodes Implemented in <code>c_project/protocol.h</code>
+              </span>
               <button
                 type="button"
                 onClick={() =>
@@ -186,7 +205,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                 className="text-emerald-400 hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <FolderOpen className="w-3.5 h-3.5" />
-                <span>Open Visual File Browser</span>
+                <span>Open Sandbox File Browser</span>
               </button>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -208,10 +227,11 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
             </div>
           </div>
 
-          {/* Adversarial Guard Verification Triggers */}
+          {/* Pre-Dispatch Rejection & Security Guard Triggers */}
           <div className="space-y-2 pt-2 border-t border-slate-800/70">
             <span className="block text-xs text-slate-400">
-              Verify Defensive Security Controls (Simulated Injection & Traversal Blocks)
+              Test Pre-Dispatch Rejection (Notice: rejected frames do not
+              increment Seq # or Executed count)
             </span>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {SECURITY_TEST_PAYLOADS.map((test) => (
@@ -237,11 +257,11 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
             <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs text-slate-400">
                 <span className="font-semibold text-slate-200">
-                  RPC Execution Transcript
+                  Simulated RPC Session Transcript
                 </span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono tabular-nums">
-                  {commandHistory.length} frames logged
+                  {commandHistory.length} entries
                 </span>
               </div>
               {commandHistory.length > 0 && (
@@ -260,14 +280,14 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
               {commandHistory.length === 0 ? (
                 <div className="py-8 text-center space-y-3">
                   <p className="text-slate-400 font-sans text-sm">
-                    No RPC frames dispatched in this session yet.
+                    No simulated RPC frames dispatched yet.
                   </p>
                   <button
                     type="button"
                     onClick={() => handleRunPreset('sysinfo')}
                     className="min-h-[40px] px-4 py-2 bg-emerald-500 text-slate-950 font-sans font-semibold text-xs rounded-lg cursor-pointer"
                   >
-                    Run Initial sysinfo() Query
+                    Run Initial sysinfo Query
                   </button>
                 </div>
               ) : (
@@ -278,7 +298,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 text-slate-400">
                       <div className="flex items-center gap-2">
-                        {item.status === 'SUCCESS' ? (
+                        {item.status !== 'BLOCKED' ? (
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                         ) : (
                           <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
@@ -291,7 +311,9 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                         <span>
                           {item.status === 'SUCCESS'
                             ? item.wireFrame?.opcodeName
-                            : item.errorCode}
+                            : item.status === 'LOCAL_HELP'
+                              ? 'LOCAL_CLI_HELP'
+                              : `${item.errorDomain} · ${item.errorCode}`}
                         </span>
                         <span aria-hidden="true"> · </span>
                         <span>{item.timestampIso.slice(11, 19)} UTC</span>
@@ -299,7 +321,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                     </div>
                     <pre
                       className={`pl-5 whitespace-pre-wrap leading-relaxed overflow-x-auto ${
-                        item.status === 'SUCCESS'
+                        item.status !== 'BLOCKED'
                           ? 'text-slate-300'
                           : 'text-red-300'
                       }`}
@@ -313,30 +335,41 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
           </div>
         </div>
 
-        {/* Right 5 Columns: Binary Wire Frame & C11 Syscall Telemetry */}
+        {/* Right 5 Columns: Request & Response Binary Frame Inspector */}
         <div className="lg:col-span-5 space-y-6">
           <div className="border border-slate-800 rounded-xl bg-slate-900/60 p-5 space-y-5">
             <div className="space-y-1">
               <p className="text-xs text-emerald-400 font-medium">
-                02. Binary Wire Frame Inspector
+                02. Request &amp; Response Wire Framing (io_framing.c)
               </p>
               <h2 className="text-lg font-semibold text-slate-100">
-                Packed C11 <code className="text-sm">sac_frame_header_t</code>
+                <code className="text-sm">sac_frame_header_t</code> (12 B) &amp;{' '}
+                <code className="text-sm">sac_resp_header_t</code> (16 B)
               </h2>
               <p className="text-xs text-slate-400">
-                Inspects the exact 12-byte network header transmitted inside the
-                TLS 1.3 AEAD record for the most recent allowlisted request.
+                Displays the exact packed network headers read/written by{' '}
+                <code className="text-slate-300">sac_io_read_exact()</code> and{' '}
+                <code className="text-slate-300">sac_io_write_all()</code>.
               </p>
             </div>
 
             {latestFrameEntry?.wireFrame ? (
               <div className="space-y-4">
-                <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-lg font-mono text-xs space-y-1">
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg font-mono text-xs space-y-1">
                   <div className="text-slate-400 text-[11px]">
-                    Wire Header Bytes (Network Byte Order / Big-Endian):
+                    Request Header (12 Bytes, Network Byte Order):
                   </div>
                   <div className="text-emerald-400 font-semibold tracking-wider break-all">
-                    {latestFrameEntry.wireFrame.rawHexPreview}
+                    {latestFrameEntry.wireFrame.requestRawHex}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg font-mono text-xs space-y-1">
+                  <div className="text-slate-400 text-[11px]">
+                    Response Header (16 Bytes, Network Byte Order):
+                  </div>
+                  <div className="text-sky-400 font-semibold tracking-wider break-all">
+                    {latestFrameEntry.wireFrame.responseRawHex}
                   </div>
                 </div>
 
@@ -356,7 +389,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                   </div>
                   <div className="py-2 flex justify-between gap-4">
                     <dt className="text-slate-400 font-sans">
-                      Sequence Nonce
+                      In-Session Sequence #
                     </dt>
                     <dd className="text-slate-200">
                       {latestFrameEntry.wireFrame.sequenceNumber}
@@ -364,16 +397,26 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                   </div>
                   <div className="py-2 flex justify-between gap-4">
                     <dt className="text-slate-400 font-sans">
-                      Payload Length
+                      Req / Resp Payload Len
                     </dt>
                     <dd className="text-slate-200">
-                      {latestFrameEntry.wireFrame.payloadLengthBytes} bytes
-                      (Cap: 256 B)
+                      {latestFrameEntry.wireFrame.requestPayloadLengthBytes} B
+                      req /{' '}
+                      {latestFrameEntry.wireFrame.responsePayloadLengthBytes} B
+                      resp
                     </dd>
                   </div>
                   <div className="py-2 flex justify-between gap-4">
                     <dt className="text-slate-400 font-sans">
-                      Server C11 Syscall
+                      Response Domain
+                    </dt>
+                    <dd className="text-slate-200">
+                      {latestFrameEntry.wireFrame.responseDomain}
+                    </dd>
+                  </div>
+                  <div className="py-2 flex justify-between gap-4">
+                    <dt className="text-slate-400 font-sans">
+                      C11 Server Function
                     </dt>
                     <dd className="text-slate-200 text-right break-all">
                       {latestFrameEntry.wireFrame.cSyscallInvoked}
@@ -383,13 +426,15 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
               </div>
             ) : (
               <p className="text-xs text-slate-400">
-                Execute an allowlisted command to inspect its packed binary wire
-                header.
+                Execute an allowlisted command to inspect its 12-byte request
+                header and 16-byte response header.
               </p>
             )}
 
             <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 tabular-nums">
-              <span>CWE-22 Traversal Blocks: {sandboxFs.traversalAttemptsBlocked}</span>
+              <span>
+                CWE-22 Traversal Blocks: {sandboxFs.traversalAttemptsBlocked}
+              </span>
               <button
                 type="button"
                 onClick={() =>
@@ -400,7 +445,7 @@ export const CommandConsoleView: React.FC<CommandConsoleViewProps> = ({
                 }
                 className="text-emerald-400 hover:underline font-medium cursor-pointer"
               >
-                View C11 Server Code →
+                Inspect Real C11 Codebase →
               </button>
             </div>
           </div>

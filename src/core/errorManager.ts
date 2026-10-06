@@ -1,7 +1,7 @@
 /**
  * Pure Functional Error Manager
  * Captures, classifies, and manages operational and security policy errors
- * with CWE mappings and immutable state transitions.
+ * with separated error domains (PROTOCOL vs FILESYSTEM) matching c_project/protocol.h.
  */
 
 export enum ErrorSeverity {
@@ -11,21 +11,34 @@ export enum ErrorSeverity {
   Critical = 'CRITICAL',
 }
 
+export enum ErrorDomain {
+  None = 'SAC_DOMAIN_NONE',
+  Protocol = 'SAC_DOMAIN_PROTOCOL',
+  Filesystem = 'SAC_DOMAIN_FILESYSTEM',
+  System = 'SAC_DOMAIN_SYSTEM',
+  Router = 'UI_DOMAIN_ROUTER',
+}
+
 export enum ErrorCode {
-  PathTraversalBlocked = 'ERR_CWE22_PATH_TRAVERSAL',
-  ShellInjectionBlocked = 'ERR_CWE78_SHELL_METACHAR',
-  CommandNotAllowlisted = 'ERR_CMD_NOT_ALLOWLISTED',
-  SessionDisconnected = 'ERR_TLS_NOT_ESTABLISHED',
-  FileNotFound = 'ERR_FS_ENOENT',
-  NotADirectory = 'ERR_FS_ENOTDIR',
+  PathTraversalBlocked = 'ERR_CWE22_PATH_ESCAPE',
+  ShellInjectionBlocked = 'ERR_CWE78_INVALID_ARG',
+  CommandNotAllowlisted = 'ERR_BAD_OPCODE',
+  SessionDisconnected = 'ERR_TLS_UNAUTHENTICATED',
+  SequenceRegression = 'ERR_SEQUENCE_REGRESSION',
+  PayloadTooLarge = 'ERR_PAYLOAD_TOO_LARGE',
+  FileNotFound = 'ERR_FS_NOT_FOUND',
+  PermissionDenied = 'ERR_FS_PERMISSION_DENIED',
+  NotADirectory = 'ERR_FS_NOT_DIR',
+  NotARegularFile = 'ERR_FS_NOT_REGULAR',
+  BufferTooSmall = 'ERR_FS_BUFFER_TOO_SMALL',
   InvalidRoute = 'ERR_ROUTER_INVALID_PATH',
   InvalidFilename = 'ERR_FS_INVALID_NAME',
-  StaticAuditViolation = 'ERR_C_AUDIT_VIOLATION',
 }
 
 export interface AppError {
   readonly id: string;
   readonly code: ErrorCode;
+  readonly domain: ErrorDomain;
   readonly severity: ErrorSeverity;
   readonly title: string;
   readonly message: string;
@@ -49,6 +62,7 @@ export const createInitialErrorState = (): ErrorManagerState =>
 
 export const createAppError = (params: {
   readonly code: ErrorCode;
+  readonly domain?: ErrorDomain;
   readonly severity: ErrorSeverity;
   readonly title: string;
   readonly message: string;
@@ -63,6 +77,7 @@ export const createAppError = (params: {
   return Object.freeze({
     id,
     code: params.code,
+    domain: params.domain ?? ErrorDomain.Protocol,
     severity: params.severity,
     title: params.title,
     message: params.message,

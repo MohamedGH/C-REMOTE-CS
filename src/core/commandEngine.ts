@@ -1,14 +1,25 @@
 /**
- * Pure Functional Allowlisted Command Dispatcher & Binary Wire Frame Engine
- * Enforces zero shell invocation (no system(), popen(), or /bin/sh).
- * Maps allowlisted administrative commands to fixed C11 enum opcodes and
- * direct POSIX syscalls over mutually authenticated TLS 1.3 frames.
+ * Pure Functional Allowlisted Command Dispatcher & Binary Wire Frame Simulator
+ *
+ * Technical Honesty & Synchronization with `c_project/protocol.h`:
+ * - Only the 6 opcodes genuinely implemented in `c_project/protocol.h` and
+ *   `c_project/managers.c` (`SAC_OP_SYS_UPTIME`, `SAC_OP_SYS_UNAME`,
+ *   `SAC_OP_SYS_STATVFS`, `SAC_OP_FS_LISTDIR`, `SAC_OP_FS_READFILE`,
+ *   `SAC_OP_FS_CHDIR`) are dispatched as RPC wire frames.
+ * - `help` is explicitly marked as a local client CLI helper (`sac_parse_cli_opcode`
+ *   in `tls_helpers.c`) that does not transmit a network frame.
+ * - Rejected commands NEVER increment `sequenceCounter` or `commandsExecuted`
+ *   (matching `sac_validate_request_header` / `sac_route_dispatch` in `managers.c`).
+ * - Wire inspection displays both the 12-byte `sac_frame_header_t` request header
+ *   and the 16-byte `sac_resp_header_t` response header without inventing fake
+ *   application-layer HMAC fields.
  */
 
 import {
   AppError,
   createAppError,
   ErrorCode,
+  ErrorDomain,
   ErrorSeverity,
 } from './errorManager';
 import { err, ok, Result } from './fp';
@@ -24,12 +35,9 @@ export enum CommandOpcode {
   SysUptime = 0x01,
   SysUname = 0x02,
   SysStatVfs = 0x03,
-  SysNetIfaces = 0x04,
-  SysTlsStatus = 0x05,
   FsListDir = 0x10,
   FsReadFile = 0x11,
   FsChangeDir = 0x12,
-  Help = 0x7f,
 }
 
 export interface WireFrameInspection {
@@ -38,9 +46,13 @@ export interface WireFrameInspection {
   readonly opcodeHex: string;
   readonly opcodeName: string;
   readonly sequenceNumber: number;
-  readonly payloadLengthBytes: number;
-  readonly hmacSha256Truncated: string;
-  readonly rawHexPreview: string;
+  readonly requestPayloadLengthBytes: number;
+  readonly requestRawHex: string;
+  readonly responseStatusHex: string;
+  readonly responseDomain: string;
+  readonly responseFsStatus: string;
+  readonly responsePayloadLengthBytes: number;
+  readonly responseRawHex: string;
   readonly cSyscallInvoked: string;
 }
 
@@ -48,33 +60,40 @@ export interface CommandLogEntry {
   readonly id: string;
   readonly rawInput: string;
   readonly timestampIso: string;
-  readonly status: 'SUCCESS' | 'BLOCKED';
+  readonly status: 'SUCCESS' | 'BLOCKED' | 'LOCAL_HELP';
   readonly outputLines: ReadonlyArray<string>;
   readonly wireFrame?: WireFrameInspection;
   readonly errorCode?: ErrorCode;
+  readonly errorDomain?: ErrorDomain;
 }
 
 export interface TlsSessionState {
   readonly connected: boolean;
+  readonly simulationLabel: 'SIMULATED_BROWSER_SESSION';
   readonly remoteHost: string;
   readonly remotePort: number;
   readonly protocolVersion: 'TLSv1.3';
   readonly cipherSuite: 'TLS_AES_256_GCM_SHA384';
   readonly clientCertSubject: string;
-  readonly clientCertFingerprint: string;
+  readonly expectedServerSan: string;
   readonly sequenceCounter: number;
+  readonly commandsExecuted: number;
+  readonly securityBlocks: number;
 }
 
 export const createInitialTlsSession = (): TlsSessionState =>
   Object.freeze({
     connected: true,
-    remoteHost: '10.24.0.18',
+    simulationLabel: 'SIMULATED_BROWSER_SESSION',
+    remoteHost: '127.0.0.1',
     remotePort: 8443,
     protocolVersion: 'TLSv1.3',
     cipherSuite: 'TLS_AES_256_GCM_SHA384',
-    clientCertSubject: 'CN=admin-workstation-01,O=SecAdminOps',
-    clientCertFingerprint: 'SHA256:9f86d081884c7d659a2feaa0c55ad015',
-    sequenceCounter: 100,
+    clientCertSubject: 'CN=admin-client (Test ECDSA P-256)',
+    expectedServerSan: 'DNS:localhost, IP:127.0.0.1',
+    sequenceCounter: 0,
+    commandsExecuted: 0,
+    securityBlocks: 0,
   });
 
 const SHELL_METACHAR_PATTERN = /[;|&`$><\\!\n\r]/;
@@ -82,39 +101,35 @@ const SHELL_METACHAR_PATTERN = /[;|&`$><\\!\n\r]/;
 const formatHexByte = (n: number): string =>
   (n & 0xff).toString(16).padStart(2, '0').toUpperCase();
 
-const computeFrameHmacPreview = (
-  seq: number,
-  opcode: number,
-  payload: string
-): string => {
-  let acc = (0x811c9dc5 ^ seq ^ opcode) >>> 0;
-  for (let i = 0; i < payload.length; i++) {
-    acc ^= payload.charCodeAt(i);
-    acc = Math.imul(acc, 0x01000193) >>> 0;
-  }
-  const p1 = acc.toString(16).padStart(8, '0');
-  const p2 = ((acc ^ 0x5bd1e995) >>> 0).toString(16).padStart(8, '0');
-  return `${p1}${p2}a4f9021b`;
-};
+const formatUint32Hex = (n: number): string =>
+  [
+    formatHexByte((n >>> 24) & 0xff),
+    formatHexByte((n >>> 16) & 0xff),
+    formatHexByte((n >>> 8) & 0xff),
+    formatHexByte(n & 0xff),
+  ].join(' ');
 
 export const buildWireFrame = (params: {
   readonly opcode: CommandOpcode;
   readonly opcodeName: string;
   readonly sequenceNumber: number;
-  readonly payload: string;
+  readonly requestPayload: string;
+  readonly responsePayloadLength: number;
+  readonly statusCode?: number;
+  readonly errorDomain?: number;
+  readonly fsStatus?: number;
   readonly cSyscallInvoked: string;
 }): WireFrameInspection => {
-  const magicHex = '53 41 43 31'; // "SAC1"
+  const magicHex = '53 41 43 31'; // "SAC1" (0x53414331)
   const opByte = formatHexByte(params.opcode);
-  const seqHigh = formatHexByte((params.sequenceNumber >> 8) & 0xff);
-  const seqLow = formatHexByte(params.sequenceNumber & 0xff);
-  const lenHigh = formatHexByte((params.payload.length >> 8) & 0xff);
-  const lenLow = formatHexByte(params.payload.length & 0xff);
-  const hmac = computeFrameHmacPreview(
-    params.sequenceNumber,
-    params.opcode,
-    params.payload
-  );
+  const seqHex = formatUint32Hex(params.sequenceNumber);
+  const reqLenHigh = formatHexByte((params.requestPayload.length >>> 8) & 0xff);
+  const reqLenLow = formatHexByte(params.requestPayload.length & 0xff);
+
+  const statusByte = formatHexByte(params.statusCode ?? 0x00);
+  const domainByte = formatHexByte(params.errorDomain ?? 0x00);
+  const fsByte = formatHexByte(params.fsStatus ?? 0x00);
+  const respLenHex = formatUint32Hex(params.responsePayloadLength);
 
   return Object.freeze({
     magicHex: '0x53414331 ("SAC1")',
@@ -122,9 +137,18 @@ export const buildWireFrame = (params: {
     opcodeHex: `0x${opByte}`,
     opcodeName: params.opcodeName,
     sequenceNumber: params.sequenceNumber,
-    payloadLengthBytes: params.payload.length,
-    hmacSha256Truncated: hmac,
-    rawHexPreview: `${magicHex} 01 ${opByte} ${seqHigh} ${seqLow} ${lenHigh} ${lenLow}`,
+    requestPayloadLengthBytes: params.requestPayload.length,
+    requestRawHex: `${magicHex} 01 ${opByte} ${seqHex} ${reqLenHigh} ${reqLenLow}`,
+    responseStatusHex: `0x${statusByte}`,
+    responseDomain:
+      (params.errorDomain ?? 0) === 0
+        ? 'SAC_DOMAIN_NONE (0x00)'
+        : (params.errorDomain ?? 0) === 1
+          ? 'SAC_DOMAIN_PROTOCOL (0x01)'
+          : 'SAC_DOMAIN_FILESYSTEM (0x02)',
+    responseFsStatus: `0x${fsByte}`,
+    responsePayloadLengthBytes: params.responsePayloadLength,
+    responseRawHex: `${magicHex} 01 ${statusByte} ${domainByte} ${fsByte} ${seqHex} ${respLenHex}`,
     cSyscallInvoked: params.cSyscallInvoked,
   });
 };
@@ -136,8 +160,9 @@ export interface CommandDispatchOutcome {
 }
 
 /**
- * Pure functional validator and command router.
- * Explicitly blocks shell metacharacters (CWE-78) and unauthenticated sessions (CWE-306).
+ * Pure functional validator and command router synchronized with `c_project/managers.c`.
+ * Rejected requests increment `securityBlocks` and NEVER advance `sequenceCounter`
+ * or `commandsExecuted`.
  */
 export const dispatchAllowlistedCommand = (
   rawInput: string,
@@ -151,13 +176,14 @@ export const dispatchAllowlistedCommand = (
     return err(
       createAppError({
         code: ErrorCode.SessionDisconnected,
+        domain: ErrorDomain.Protocol,
         severity: ErrorSeverity.SecurityBlock,
-        title: 'Mutual TLS 1.3 Session Required (CWE-306)',
+        title: 'Mutual TLS 1.3 Session Required (SAC_ERR_UNAUTHENTICATED)',
         message:
-          'Rejected RPC dispatch because the mTLS session is currently disconnected.',
+          'Rejected RPC dispatch because the simulated mTLS 1.3 session is disconnected.',
         remediation:
-          'Establish the mutual TLS 1.3 handshake before dispatching remote opcodes.',
-        cweReference: 'CWE-306: Missing Authentication for Critical Function',
+          'Reconnect the simulated mTLS 1.3 handshake before dispatching remote opcodes.',
+        cweReference: 'CWE-306',
         contextInput: trimmed,
         timestampIso,
       })
@@ -168,12 +194,13 @@ export const dispatchAllowlistedCommand = (
     return err(
       createAppError({
         code: ErrorCode.ShellInjectionBlocked,
+        domain: ErrorDomain.Protocol,
         severity: ErrorSeverity.SecurityBlock,
-        title: 'OS Shell Metacharacter Blocked (CWE-78)',
-        message: `Input "${trimmed}" contains shell control operators (; | & \` $ > <). SecAdminC never invokes /bin/sh, system(), or popen() and strictly rejects compound shell syntax.`,
+        title: 'Forbidden Shell/Control Character Rejected (SAC_ERR_INVALID_ARGUMENT)',
+        message: `Input "${trimmed}" contains shell control operators (; | & \` $ > < \\). In c_project/managers.c, has_forbidden_argument_chars() rejects the frame before any syscall.`,
         remediation:
-          'Issue a single allowlisted command token (e.g., sysinfo, uname, df, netstat, ls, cat <file>, cd <dir>).',
-        cweReference: 'CWE-78: Improper Neutralization of Special Elements used in an OS Command',
+          'Issue a single allowlisted command token (sysinfo, uname, df, ls, cat <file>, cd <dir>).',
+        cweReference: 'CWE-78',
         contextInput: trimmed,
         timestampIso,
       })
@@ -183,11 +210,50 @@ export const dispatchAllowlistedCommand = (
   const parts = trimmed.split(/\s+/).filter(Boolean);
   const cmd = (parts[0] ?? 'help').toLowerCase();
   const arg = parts.slice(1).join(' ');
+
+  if (arg.length > 256) {
+    return err(
+      createAppError({
+        code: ErrorCode.PayloadTooLarge,
+        domain: ErrorDomain.Protocol,
+        severity: ErrorSeverity.SecurityBlock,
+        title: 'Request Payload Exceeds SAC_MAX_PATH_LEN (SAC_ERR_PAYLOAD_TOO_LARGE)',
+        message: `Argument length (${arg.length} bytes) exceeds SAC_MAX_PATH_LEN (256 bytes).`,
+        remediation: 'Keep path arguments at or below 256 bytes.',
+        cweReference: 'CWE-789',
+        contextInput: trimmed.slice(0, 64) + '...',
+        timestampIso,
+      })
+    );
+  }
+
+  if (cmd === 'help') {
+    const entry: CommandLogEntry = Object.freeze({
+      id: `help_${Date.now()}`,
+      rawInput: trimmed || 'help',
+      timestampIso,
+      status: 'LOCAL_HELP',
+      outputLines: Object.freeze([
+        'Implemented C11 Wire Opcodes in c_project/protocol.h (Zero Shell Execution):',
+        '  sysinfo | uptime -> SAC_OP_SYS_UPTIME (0x01)   POSIX sysinfo(&si)',
+        '  uname            -> SAC_OP_SYS_UNAME (0x02)    POSIX uname(&uts)',
+        '  df | statvfs     -> SAC_OP_SYS_STATVFS (0x03)  POSIX fstatvfs(jail_dirfd, &vfs)',
+        '  ls [dir]         -> SAC_OP_FS_LISTDIR (0x10)   sac_fs_list_dir(jail_dirfd, cwd_rel, arg)',
+        '  cat <file>       -> SAC_OP_FS_READFILE (0x11)  sac_fs_read_file(jail_dirfd, cwd_rel, arg)',
+        '  cd <dir>         -> SAC_OP_FS_CHDIR (0x12)     sac_fs_chdir(jail_dirfd, cwd_rel, arg)',
+        'Note: "help" is a local client CLI command and does not send a network frame.',
+      ]),
+    });
+    return ok(
+      Object.freeze({
+        entry,
+        nextFsState: fsState,
+        nextSessionState: sessionState,
+      })
+    );
+  }
+
   const nextSeq = sessionState.sequenceCounter + 1;
-  const nextSessionState: TlsSessionState = Object.freeze({
-    ...sessionState,
-    sequenceCounter: nextSeq,
-  });
 
   const makeSuccess = (
     opcode: CommandOpcode,
@@ -196,16 +262,23 @@ export const dispatchAllowlistedCommand = (
     outputLines: ReadonlyArray<string>,
     updatedFsState: SandboxFsState = fsState
   ): Result<CommandDispatchOutcome, AppError> => {
+    const joinedOutput = outputLines.join('\n') + '\n';
     const wireFrame = buildWireFrame({
       opcode,
       opcodeName,
       sequenceNumber: nextSeq,
-      payload: arg,
+      requestPayload: arg,
+      responsePayloadLength: joinedOutput.length,
       cSyscallInvoked,
+    });
+    const nextSessionState: TlsSessionState = Object.freeze({
+      ...sessionState,
+      sequenceCounter: nextSeq,
+      commandsExecuted: sessionState.commandsExecuted + 1,
     });
     const entry: CommandLogEntry = Object.freeze({
       id: `cmd_${nextSeq}`,
-      rawInput: trimmed || 'help',
+      rawInput: trimmed,
       timestampIso,
       status: 'SUCCESS',
       outputLines: Object.freeze(outputLines),
@@ -221,99 +294,48 @@ export const dispatchAllowlistedCommand = (
   };
 
   switch (cmd) {
-    case 'help':
-      return makeSuccess(
-        CommandOpcode.Help,
-        'OP_HELP_SCHEMA',
-        'local_dispatch_table_lookup()',
-        [
-          'Allowlisted Remote RPC Opcodes (Zero Shell Execution):',
-          '  sysinfo          -> OP_SYS_UPTIME (0x01)   POSIX sysinfo(&info)',
-          '  uname            -> OP_SYS_UNAME (0x02)    POSIX uname(&uts)',
-          '  df               -> OP_SYS_STATVFS (0x03)  POSIX statvfs("/srv/sandbox", &vfs)',
-          '  netstat          -> OP_SYS_NETIF (0x04)    POSIX getifaddrs(&ifaddr)',
-          '  tls              -> OP_SYS_TLS (0x05)      OpenSSL SSL_get_current_cipher(ssl)',
-          '  ls [dir]         -> OP_FS_LISTDIR (0x10)   POSIX openat(O_NOFOLLOW | O_DIRECTORY)',
-          '  cd <dir>         -> OP_FS_CHDIR (0x12)     realpath() + strncmp() jail verify',
-          '  cat <file>       -> OP_FS_READFILE (0x11)  POSIX openat(O_RDONLY | O_NOFOLLOW)',
-        ]
-      );
-
     case 'sysinfo':
     case 'uptime':
       return makeSuccess(
         CommandOpcode.SysUptime,
-        'OP_SYS_UPTIME',
-        'sysinfo(&si) /* <sys/sysinfo.h> */',
+        'SAC_OP_SYS_UPTIME',
+        'sysinfo(&si) /* c_project/managers.c */',
         [
-          'struct sysinfo telemetry (direct kernel syscall, no shell):',
-          '  Uptime        : 14 days, 06:42:19 (1,233,739 seconds)',
-          '  Load Averages : 0.14 (1m) · 0.19 (5m) · 0.11 (15m)',
-          '  Total RAM     : 16,384 MB (Free: 11,420 MB · Buffered: 980 MB)',
-          '  Active Procs  : 142 tasks',
+          '[SIMULATED UI OUTPUT — C11 server runs sysinfo(&si)]',
+          'OK uptime=1233739s procs=142 freeram_mb=11420',
         ]
       );
 
     case 'uname':
       return makeSuccess(
         CommandOpcode.SysUname,
-        'OP_SYS_UNAME',
-        'uname(&uts) /* <sys/utsname.h> */',
+        'SAC_OP_SYS_UNAME',
+        'uname(&uts) /* c_project/managers.c */',
         [
-          'struct utsname kernel identity:',
-          '  sysname  : Linux',
-          '  nodename : prod-edge-node-04.internal',
-          '  release  : 6.8.0-45-generic',
-          '  version  : #45-Ubuntu SMP PREEMPT_DYNAMIC',
-          '  machine  : x86_64',
+          '[SIMULATED UI OUTPUT — C11 server runs uname(&uts)]',
+          'OK Linux sandbox-node 6.1.0-sec x86_64',
         ]
       );
 
     case 'df':
-    case 'statvfs':
+    case 'statvfs': {
+      const cwdRel =
+        fsState.currentDir === fsState.jailRoot
+          ? '.'
+          : fsState.currentDir.slice(fsState.jailRoot.length + 1);
       return makeSuccess(
         CommandOpcode.SysStatVfs,
-        'OP_SYS_STATVFS',
-        'statvfs("/srv/sandbox", &vfs) /* <sys/statvfs.h> */',
+        'SAC_OP_SYS_STATVFS',
+        'fstatvfs(state.jail_dirfd, &vfs) /* c_project/managers.c */',
         [
-          'struct statvfs volume telemetry for /srv/sandbox:',
-          '  Filesystem Block Size : 4,096 bytes',
-          '  Total Capacity        : 128.00 GB (33,554,432 blocks)',
-          '  Available Unprivileged: 94.60 GB (73.9% free)',
-          '  Mount Flags           : ST_NOSUID | ST_NODEV | ST_NOEXEC',
+          '[SIMULATED UI OUTPUT — C11 server runs fstatvfs(jail_dirfd, &vfs)]',
+          `OK cwd=${cwdRel} free_mb=96870 bsize=4096`,
         ]
       );
-
-    case 'netstat':
-    case 'net-interfaces':
-      return makeSuccess(
-        CommandOpcode.SysNetIfaces,
-        'OP_SYS_NETIF',
-        'getifaddrs(&ifaddr) /* <ifaddrs.h> */',
-        [
-          'POSIX getifaddrs() active interfaces:',
-          '  lo    : AF_INET 127.0.0.1/8 · state UP · loopback',
-          '  eth0  : AF_INET 10.24.0.18/24 · state UP · mTLS listener :8443',
-          '  wg0   : AF_INET 100.64.0.4/32 · state UP · management mesh',
-        ]
-      );
-
-    case 'tls':
-      return makeSuccess(
-        CommandOpcode.SysTlsStatus,
-        'OP_SYS_TLS',
-        'SSL_get_version(ssl) + SSL_get_peer_certificate(ssl)',
-        [
-          `Protocol Version : ${sessionState.protocolVersion}`,
-          `Active Cipher    : ${sessionState.cipherSuite}`,
-          `Client Subject   : ${sessionState.clientCertSubject}`,
-          `Cert Fingerprint : ${sessionState.clientCertFingerprint}`,
-          `Sequence Counter : ${nextSeq} (anti-replay monotonic nonce)`,
-        ]
-      );
+    }
 
     case 'ls': {
-      const targetDir = arg ? arg : fsState.currentDir;
+      const targetDir = arg ? arg : '.';
       const cdResult = changeSandboxDirectory(fsState, targetDir);
       if (cdResult.tag === 'ERR') {
         return cdResult;
@@ -323,32 +345,44 @@ export const dispatchAllowlistedCommand = (
         searchQuery: '',
       });
       const lines = [
-        `Directory listing for ${cdResult.value.currentDir} (${children.length} entries):`,
+        `Directory listing for ${cdResult.value.currentDir} (resolved from cwd="${fsState.currentDir}"):`,
         ...children.map(
           (node) =>
-            `  ${node.permissionsOctal}  ${node.type === FsNodeType.Directory ? 'DIR ' : 'FILE'}  ${String(node.sizeBytes).padStart(6, ' ')} B  ${node.name}`
+            `  ${node.permissionsOctal}  ${
+              node.type === FsNodeType.Directory
+                ? 'DIR '
+                : node.type === FsNodeType.Symlink
+                  ? 'LINK'
+                  : 'FILE'
+            }  ${String(node.sizeBytes).padStart(6, ' ')} B  ${node.name}${
+              node.type === FsNodeType.Symlink ? ` -> ${node.symlinkTarget}` : ''
+            }`
         ),
       ];
       return makeSuccess(
         CommandOpcode.FsListDir,
-        'OP_FS_LISTDIR',
-        'openat(jail_fd, rel_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)',
+        'SAC_OP_FS_LISTDIR',
+        'sac_fs_list_dir(jail_dirfd, state.cwd_rel, arg) /* openat2 RESOLVE_BENEATH */',
         lines,
         fsState
       );
     }
 
     case 'cd': {
-      const targetDir = arg || '/srv/sandbox';
+      const targetDir = arg || '.';
       const cdResult = changeSandboxDirectory(fsState, targetDir);
       if (cdResult.tag === 'ERR') {
         return cdResult;
       }
+      const cwdRel =
+        cdResult.value.currentDir === cdResult.value.jailRoot
+          ? '.'
+          : cdResult.value.currentDir.slice(cdResult.value.jailRoot.length + 1);
       return makeSuccess(
         CommandOpcode.FsChangeDir,
-        'OP_FS_CHDIR',
-        'realpath(input, resolved) + strncmp(resolved, "/srv/sandbox", 12)',
-        [`Working directory changed to ${cdResult.value.currentDir}`],
+        'SAC_OP_FS_CHDIR',
+        'sac_fs_chdir(jail_dirfd, state.cwd_rel, arg, next_cwd)',
+        [`OK cwd=${cwdRel} (Full sandbox path: ${cdResult.value.currentDir})`],
         cdResult.value
       );
     }
@@ -358,11 +392,12 @@ export const dispatchAllowlistedCommand = (
         return err(
           createAppError({
             code: ErrorCode.FileNotFound,
+            domain: ErrorDomain.Filesystem,
             severity: ErrorSeverity.Warning,
-            title: 'Missing Filename Argument',
-            message: 'Command "cat" requires a file path inside /srv/sandbox.',
+            title: 'Missing Filename Argument (SAC_FS_ERR_NOT_FOUND)',
+            message: 'Command "cat" requires a relative or /srv/sandbox file path.',
             remediation:
-              'Try "cat /srv/sandbox/config/tls_policy.conf" or "cat health_snapshot.txt".',
+              'Try "cat config/tls_policy.conf" or "cd reports" then "cat health_snapshot.txt".',
             contextInput: trimmed,
             timestampIso,
           })
@@ -374,14 +409,14 @@ export const dispatchAllowlistedCommand = (
       }
       const { file, state: nextFs } = readResult.value;
       const lines = [
-        `File: ${file.path} (${file.sizeBytes} bytes · SHA256:${file.sha256Short})`,
+        `File: ${file.path} (${file.sizeBytes} bytes · FNV1a-64:${file.fnv1a64Hex})`,
         '------------------------------------------------------------',
         ...(file.content ?? '').split('\n'),
       ];
       return makeSuccess(
         CommandOpcode.FsReadFile,
-        'OP_FS_READFILE',
-        'openat(jail_fd, rel_path, O_RDONLY | O_NOFOLLOW)',
+        'SAC_OP_FS_READFILE',
+        'sac_fs_read_file(jail_dirfd, state.cwd_rel, arg) /* openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS */',
         lines,
         nextFs
       );
@@ -391,12 +426,13 @@ export const dispatchAllowlistedCommand = (
       return err(
         createAppError({
           code: ErrorCode.CommandNotAllowlisted,
+          domain: ErrorDomain.Protocol,
           severity: ErrorSeverity.SecurityBlock,
-          title: 'Command Rejected by Strict Allowlist Policy',
-          message: `Command "${cmd}" is not a registered enum opcode. Arbitrary binary execution (execve/system/popen) is disabled by design.`,
+          title: 'Opcode Rejected by Allowlist (SAC_ERR_BAD_OPCODE)',
+          message: `Command "${cmd}" is not one of the 6 allowlisted opcodes in c_project/protocol.h. Arbitrary command execution is disabled.`,
           remediation:
-            'Use only allowlisted diagnostic commands: sysinfo, uname, df, netstat, tls, ls, cd, cat, or help.',
-          cweReference: 'CWE-78: OS Command Injection Prevention via Enum Allowlisting',
+            'Use only implemented C11 opcodes: sysinfo, uname, df, ls, cd, cat (or local "help").',
+          cweReference: 'CWE-78',
           contextInput: trimmed,
           timestampIso,
         })

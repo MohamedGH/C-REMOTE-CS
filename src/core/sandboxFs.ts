@@ -1,13 +1,23 @@
 /**
- * Pure Functional Sandboxed Virtual File System & realpath() Jail Engine
- * Simulates POSIX opendir/readdir/statat/openat(O_NOFOLLOW) strictly confined
- * to JAIL_ROOT = "/srv/sandbox". Blocks any CWE-22 path traversal attempts.
+ * Pure Functional Simulated Virtual File System (Browser UI Demonstrator)
+ *
+ * Honesty & Architecture Note:
+ * - In the browser UI, this module simulates an in-memory directory tree rooted at
+ *   "/srv/sandbox" to demonstrate how `cwd_rel`, path normalization, symlink blocking,
+ *   and granular `sac_fs_status_t` errors behave.
+ * - In the real C11 implementation (`c_project/sandbox_fs.c`), confinement is enforced
+ *   at the OS level via an open `jail_dirfd` using Linux `openat2(RESOLVE_BENEATH |
+ *   RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)` with a documented
+ *   component-by-component `openat(O_NOFOLLOW | O_CLOEXEC)` fallback.
+ * - Checksums displayed in this in-memory UI are 64-bit FNV-1a non-cryptographic
+ *   content checksums (`fnv1a64Hex`), never labeled as SHA-256.
  */
 
 import {
   AppError,
   createAppError,
   ErrorCode,
+  ErrorDomain,
   ErrorSeverity,
 } from './errorManager';
 import { err, ok, Result } from './fp';
@@ -17,6 +27,7 @@ export const JAIL_ROOT = '/srv/sandbox';
 export enum FsNodeType {
   Directory = 'DIRECTORY',
   File = 'FILE',
+  Symlink = 'SYMLINK',
 }
 
 export interface VirtualFsNode {
@@ -28,7 +39,8 @@ export interface VirtualFsNode {
   readonly owner: string;
   readonly sizeBytes: number;
   readonly modifiedIso: string;
-  readonly sha256Short: string;
+  readonly fnv1a64Hex: string;
+  readonly symlinkTarget?: string;
   readonly content?: string;
 }
 
@@ -41,23 +53,20 @@ export interface SandboxFsState {
   readonly traversalAttemptsBlocked: number;
 }
 
-const computePseudoDigest = (text: string): string => {
-  let h1 = 0xdeadbeef ^ text.length;
-  let h2 = 0x41c6ce57 ^ text.length;
+/**
+ * Computes a 64-bit FNV-1a non-cryptographic checksum (16 hex chars) for UI file preview.
+ * Explicitly named `computeFnv1a64Hex` to avoid any confusion with SHA-256.
+ */
+export const computeFnv1a64Hex = (text: string): string => {
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0xcbf29ce4 >>> 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ ((ch << 3) | (ch >>> 5)), 0x01000193) >>> 0;
   }
-  h1 =
-    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
-    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 =
-    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
-    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (
-    (h2 >>> 0).toString(16).padStart(8, '0') +
-    (h1 >>> 0).toString(16).padStart(8, '0')
+    h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0')
   );
 };
 
@@ -71,7 +80,7 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     owner: 'secadmin:secadmin',
     sizeBytes: 4096,
     modifiedIso: '2026-10-05T18:00:00Z',
-    sha256Short: 'd4f1a90011b2c3d4',
+    fnv1a64Hex: '811c9dc5cbf29ce4',
   }),
   Object.freeze({
     path: '/srv/sandbox/config',
@@ -82,7 +91,7 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     owner: 'secadmin:secadmin',
     sizeBytes: 4096,
     modifiedIso: '2026-10-05T18:10:00Z',
-    sha256Short: '88a12f09c441e821',
+    fnv1a64Hex: '88a12f09c441e821',
   }),
   Object.freeze({
     path: '/srv/sandbox/logs',
@@ -93,7 +102,7 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     owner: 'secadmin:secadmin',
     sizeBytes: 4096,
     modifiedIso: '2026-10-06T00:15:00Z',
-    sha256Short: '91b03e77a219d004',
+    fnv1a64Hex: '91b03e77a219d004',
   }),
   Object.freeze({
     path: '/srv/sandbox/reports',
@@ -104,7 +113,7 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     owner: 'secadmin:secadmin',
     sizeBytes: 4096,
     modifiedIso: '2026-10-06T00:30:00Z',
-    sha256Short: '3c4490ab1289ef01',
+    fnv1a64Hex: '3c4490ab1289ef01',
   }),
   Object.freeze({
     path: '/srv/sandbox/config/tls_policy.conf',
@@ -113,18 +122,19 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     type: FsNodeType.File,
     permissionsOctal: '0640',
     owner: 'secadmin:secadmin',
-    sizeBytes: 418,
+    sizeBytes: 432,
     modifiedIso: '2026-10-05T18:12:00Z',
-    sha256Short: '7a9e02bc1940fa88',
+    fnv1a64Hex: computeFnv1a64Hex('tls_policy.conf'),
     content: [
-      '# SecAdminC Mutual TLS 1.3 Daemon Policy',
+      '# SecAdminC Mutual TLS 1.3 Daemon Policy (c_project/tls_helpers.c)',
       'min_protocol_version = TLSv1.3',
       'ciphersuites = TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256',
-      'require_client_cert = true',
-      'verify_depth = 2',
-      'sandbox_chroot_dir = /srv/sandbox',
+      'require_client_cert = true (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT)',
+      'client_san_verification = true (SSL_set1_host / X509_VERIFY_PARAM_set1_ip_asc)',
+      'sandbox_jail_dir = /srv/sandbox (openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)',
       'allow_shell_exec = false',
-      'max_frame_payload_bytes = 16384',
+      'max_request_path_bytes = 256',
+      'max_response_payload_bytes = 4096',
     ].join('\n'),
   }),
   Object.freeze({
@@ -134,19 +144,20 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     type: FsNodeType.File,
     permissionsOctal: '0640',
     owner: 'secadmin:secadmin',
-    sizeBytes: 362,
+    sizeBytes: 486,
     modifiedIso: '2026-10-05T19:00:00Z',
-    sha256Short: 'c5109fe3a88412b0',
+    fnv1a64Hex: computeFnv1a64Hex('allowlist_opcodes.json'),
     content: JSON.stringify(
       {
-        schemaVersion: 1,
+        headerFile: 'c_project/protocol.h',
         shellExecutionPermitted: false,
-        allowedOpcodes: [
-          { id: 1, name: 'OP_SYS_UPTIME', syscall: 'sysinfo(&info)' },
-          { id: 2, name: 'OP_SYS_UNAME', syscall: 'uname(&uts)' },
-          { id: 3, name: 'OP_SYS_STATVFS', syscall: 'statvfs("/srv/sandbox", &vfs)' },
-          { id: 4, name: 'OP_FS_LISTDIR', syscall: 'openat(O_NOFOLLOW | O_DIRECTORY)' },
-          { id: 5, name: 'OP_FS_READFILE', syscall: 'openat(O_RDONLY | O_NOFOLLOW)' },
+        implementedC11Opcodes: [
+          { hex: '0x01', name: 'SAC_OP_SYS_UPTIME', cSyscall: 'sysinfo(&si)' },
+          { hex: '0x02', name: 'SAC_OP_SYS_UNAME', cSyscall: 'uname(&uts)' },
+          { hex: '0x03', name: 'SAC_OP_SYS_STATVFS', cSyscall: 'fstatvfs(jail_dirfd, &vfs)' },
+          { hex: '0x10', name: 'SAC_OP_FS_LISTDIR', cSyscall: 'sac_fs_list_dir(jail_dirfd, cwd_rel, arg)' },
+          { hex: '0x11', name: 'SAC_OP_FS_READFILE', cSyscall: 'sac_fs_read_file(jail_dirfd, cwd_rel, arg)' },
+          { hex: '0x12', name: 'SAC_OP_FS_CHDIR', cSyscall: 'sac_fs_chdir(jail_dirfd, cwd_rel, arg)' },
         ],
       },
       null,
@@ -160,14 +171,15 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     type: FsNodeType.File,
     permissionsOctal: '0640',
     owner: 'secadmin:secadmin',
-    sizeBytes: 512,
+    sizeBytes: 498,
     modifiedIso: '2026-10-06T00:42:10Z',
-    sha256Short: 'e01948bc7721a439',
+    fnv1a64Hex: computeFnv1a64Hex('audit_daemon.log'),
     content: [
-      '2026-10-06T00:10:02Z [INFO] TLSv1.3 handshake verified (CN=admin-workstation-01, SHA256=9f86d08)',
-      '2026-10-06T00:14:19Z [INFO] Dispatch OP_SYS_UNAME -> 0 (Linux 6.8.0-sec x86_64)',
-      '2026-10-06T00:22:41Z [BLOCK] CWE-22 Path Traversal blocked: input="../../etc/shadow" resolved="/etc/shadow" outside "/srv/sandbox"',
-      '2026-10-06T00:35:11Z [INFO] Dispatch OP_FS_LISTDIR -> "/srv/sandbox/reports" (2 entries)',
+      '[SIMULATED DEMO LOG — Matches c_project/managers.c format]',
+      '2026-10-06T00:10:02Z [INFO] TLSv1.3 mTLS session initialized (jail_dirfd=3, cwd_rel=".")',
+      '2026-10-06T00:14:19Z [INFO] Dispatch SAC_OP_SYS_UNAME (seq=1) -> SAC_OK',
+      '2026-10-06T00:22:41Z [BLOCK] domain=FILESYSTEM fs_status=SAC_FS_ERR_PATH_ESCAPE input="../../etc/shadow"',
+      '2026-10-06T00:35:11Z [INFO] Dispatch SAC_OP_FS_CHDIR (seq=2) -> cwd_rel="reports"',
     ].join('\n'),
   }),
   Object.freeze({
@@ -177,16 +189,39 @@ export const INITIAL_FS_NODES: ReadonlyArray<VirtualFsNode> = Object.freeze([
     type: FsNodeType.File,
     permissionsOctal: '0640',
     owner: 'secadmin:secadmin',
-    sizeBytes: 294,
+    sizeBytes: 312,
     modifiedIso: '2026-10-06T00:30:00Z',
-    sha256Short: '4490ab1289ef0192',
+    fnv1a64Hex: computeFnv1a64Hex('health_snapshot.txt'),
     content: [
-      'Node Hostname   : prod-edge-node-04.internal',
-      'Kernel Release  : Linux 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC',
-      'TLS Cipher      : TLS_AES_256_GCM_SHA384 (256-bit)',
-      'Sandbox Root    : /srv/sandbox (chroot + O_NOFOLLOW active)',
-      'Memory Free     : 11,420 MB / 16,384 MB',
+      'Sample Report Node : simulated-sandbox-node',
+      'Confinement Model  : Linux openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)',
+      'Fallback Model     : Stepwise openat(O_NOFOLLOW | O_CLOEXEC) depth>=0 walker',
+      'TLS Protocol Floor : TLSv1.3 with mandatory client & server SAN verification',
     ].join('\n'),
+  }),
+  Object.freeze({
+    path: '/srv/sandbox/reports/restricted_key_backup.txt',
+    name: 'restricted_key_backup.txt',
+    parentPath: '/srv/sandbox/reports',
+    type: FsNodeType.File,
+    permissionsOctal: '0000',
+    owner: 'root:root',
+    sizeBytes: 64,
+    modifiedIso: '2026-10-06T00:31:00Z',
+    fnv1a64Hex: '0000000000000000',
+    content: '',
+  }),
+  Object.freeze({
+    path: '/srv/sandbox/logs/symlink_escape_test',
+    name: 'symlink_escape_test',
+    parentPath: '/srv/sandbox/logs',
+    type: FsNodeType.Symlink,
+    permissionsOctal: '0777',
+    owner: 'secadmin:secadmin',
+    sizeBytes: 11,
+    modifiedIso: '2026-10-06T00:32:00Z',
+    fnv1a64Hex: '0000000000000000',
+    symlinkTarget: '/etc/passwd',
   }),
 ]);
 
@@ -201,8 +236,10 @@ export const createInitialSandboxFsState = (): SandboxFsState =>
   });
 
 /**
- * Pure POSIX-style path resolution with strict jail root containment check.
- * Simulates C11 realpath() + strncmp(resolved, JAIL_ROOT, strlen(JAIL_ROOT)).
+ * Pure depth-checked relative path resolver modeling `normalize_jail_relative_path()`
+ * in `c_project/sandbox_fs.c`.
+ * Rejects any `..` segment that ascends above `jailRoot` (depth < 0) rather than
+ * silently clamping `..` at root.
  */
 export const resolveSandboxedPath = (
   currentDir: string,
@@ -210,61 +247,83 @@ export const resolveSandboxedPath = (
   jailRoot: string = JAIL_ROOT
 ): Result<string, AppError> => {
   const raw = requestedPath.trim();
-  if (!raw) {
+  if (!raw || raw === '.') {
     return ok(currentDir);
   }
 
-  // Detect null bytes or control characters immediately
-  if (/[\x00-\x1f]/.test(raw) || raw.includes('\\')) {
+  if (/[\x00-\x1f\x7f]/.test(raw) || raw.includes('\\')) {
     return err(
       createAppError({
         code: ErrorCode.PathTraversalBlocked,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.SecurityBlock,
-        title: 'Illegal Control or Backslash Character in Path',
-        message: `Rejected path "${raw}" due to illegal characters before syscall invocation.`,
+        title: 'Illegal Control or Backslash Character (SAC_FS_ERR_PATH_ESCAPE)',
+        message: `Rejected path "${raw}" due to backslash or control byte before descriptor lookup.`,
         remediation:
-          'Use clean POSIX forward-slash relative or /srv/sandbox paths without backslashes or control bytes.',
-        cweReference: 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory',
+          'Use clean POSIX forward-slash relative paths inside /srv/sandbox.',
+        cweReference: 'CWE-22',
         contextInput: raw,
       })
     );
   }
 
-  const combined = raw.startsWith('/') ? raw : `${currentDir}/${raw}`;
-  const segments = combined.split('/');
-  const resolvedStack: string[] = [];
+  let relativeCombined: string;
+  if (raw.startsWith('/')) {
+    if (raw === jailRoot || raw.startsWith(`${jailRoot}/`)) {
+      relativeCombined = raw.slice(jailRoot.length).replace(/^\/+/, '');
+    } else {
+      return err(
+        createAppError({
+          code: ErrorCode.PathTraversalBlocked,
+          domain: ErrorDomain.Filesystem,
+          severity: ErrorSeverity.SecurityBlock,
+          title: 'Absolute Path Outside Jail Blocked (SAC_FS_ERR_PATH_ESCAPE)',
+          message: `Path "${raw}" points outside jail root "${jailRoot}". In C11 sandbox_fs.c, openat2(RESOLVE_BENEATH) and normalize_jail_relative_path() reject external absolute paths.`,
+          remediation: `Specify a path relative to ${currentDir} or inside ${jailRoot}.`,
+          cweReference: 'CWE-22',
+          contextInput: requestedPath,
+        })
+      );
+    }
+  } else {
+    const cwdRel =
+      currentDir === jailRoot
+        ? ''
+        : currentDir.slice(jailRoot.length).replace(/^\/+/, '');
+    relativeCombined = cwdRel ? `${cwdRel}/${raw}` : raw;
+  }
 
-  for (const segment of segments) {
-    if (!segment || segment === '.') {
+  const segments = relativeCombined.split('/');
+  const stack: string[] = [];
+
+  for (const seg of segments) {
+    if (!seg || seg === '.') {
       continue;
     }
-    if (segment === '..') {
-      resolvedStack.pop();
+    if (seg === '..') {
+      if (stack.length === 0) {
+        return err(
+          createAppError({
+            code: ErrorCode.PathTraversalBlocked,
+            domain: ErrorDomain.Filesystem,
+            severity: ErrorSeverity.SecurityBlock,
+            title: 'Sandbox Jail Escape Blocked (SAC_FS_ERR_PATH_ESCAPE)',
+            message: `Relative traversal "${requestedPath}" from "${currentDir}" ascends above jail root "${jailRoot}" (depth < 0). Blocked by RESOLVE_BENEATH / depth counter.`,
+            remediation: `Do not use ".." segments that ascend above ${jailRoot}.`,
+            cweReference: 'CWE-22',
+            contextInput: requestedPath,
+          })
+        );
+      }
+      stack.pop();
     } else {
-      resolvedStack.push(segment);
+      stack.push(seg);
     }
   }
 
-  const canonicalPath = '/' + resolvedStack.join('/');
-
-  const isInsideJail =
-    canonicalPath === jailRoot || canonicalPath.startsWith(`${jailRoot}/`);
-
-  if (!isInsideJail) {
-    return err(
-      createAppError({
-        code: ErrorCode.PathTraversalBlocked,
-        severity: ErrorSeverity.SecurityBlock,
-        title: 'Sandbox Jail Escape Blocked (CWE-22)',
-        message: `Canonicalized path "${canonicalPath}" escapes sandbox root "${jailRoot}". In C11 server, strncmp(resolved, JAIL_ROOT, strlen(JAIL_ROOT)) rejected the request.`,
-        remediation: `Keep all file requests strictly inside ${jailRoot}. Relative parent segments (..) that ascend above the jail root are forbidden.`,
-        cweReference: 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory',
-        contextInput: requestedPath,
-      })
-    );
-  }
-
-  return ok(canonicalPath);
+  const canonical =
+    stack.length === 0 ? jailRoot : `${jailRoot}/${stack.join('/')}`;
+  return ok(canonical);
 };
 
 export const changeSandboxDirectory = (
@@ -287,10 +346,26 @@ export const changeSandboxDirectory = (
     return err(
       createAppError({
         code: ErrorCode.FileNotFound,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.Warning,
-        title: 'Directory Not Found (ENOENT)',
-        message: `Path "${targetPath}" does not exist inside the sandboxed virtual filesystem.`,
-        remediation: 'Verify the directory name or use the directory breadcrumb navigation.',
+        title: 'Directory Not Found (SAC_FS_ERR_NOT_FOUND)',
+        message: `Path "${targetPath}" does not exist inside ${state.jailRoot}.`,
+        remediation: 'Verify the directory name or use the directory table.',
+        contextInput: targetPathInput,
+      })
+    );
+  }
+
+  if (node.type === FsNodeType.Symlink) {
+    return err(
+      createAppError({
+        code: ErrorCode.PathTraversalBlocked,
+        domain: ErrorDomain.Filesystem,
+        severity: ErrorSeverity.SecurityBlock,
+        title: 'Symlink Traversal Blocked (SAC_FS_ERR_PATH_ESCAPE)',
+        message: `Target "${targetPath}" is a symbolic link (-> ${node.symlinkTarget}). Blocked by RESOLVE_NO_SYMLINKS / O_NOFOLLOW.`,
+        remediation: 'Access regular directories and files directly; symlinks are forbidden inside the sandbox.',
+        cweReference: 'CWE-22',
         contextInput: targetPathInput,
       })
     );
@@ -300,10 +375,11 @@ export const changeSandboxDirectory = (
     return err(
       createAppError({
         code: ErrorCode.NotADirectory,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.Warning,
-        title: 'Target Is Not a Directory (ENOTDIR)',
+        title: 'Target Is Not a Directory (SAC_FS_ERR_NOT_DIR)',
         message: `Path "${targetPath}" is a regular file, not a directory.`,
-        remediation: 'Select the file to inspect its contents instead of changing directory into it.',
+        remediation: 'Use "cat" or click the file row to read regular files.',
         contextInput: targetPathInput,
       })
     );
@@ -320,7 +396,10 @@ export const changeSandboxDirectory = (
 export const readSandboxFile = (
   state: SandboxFsState,
   targetPathInput: string
-): Result<{ readonly state: SandboxFsState; readonly file: VirtualFsNode }, AppError> => {
+): Result<
+  { readonly state: SandboxFsState; readonly file: VirtualFsNode },
+  AppError
+> => {
   const resolvedResult = resolveSandboxedPath(
     state.currentDir,
     targetPathInput,
@@ -337,23 +416,55 @@ export const readSandboxFile = (
     return err(
       createAppError({
         code: ErrorCode.FileNotFound,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.Warning,
-        title: 'File Not Found (ENOENT)',
-        message: `File "${targetPath}" was not found inside ${state.jailRoot}.`,
-        remediation: 'Select an existing file in the sandboxed directory list.',
+        title: 'File Not Found (SAC_FS_ERR_NOT_FOUND)',
+        message: `File "${targetPath}" (resolved from working dir "${state.currentDir}") does not exist.`,
+        remediation: 'Verify the filename or check the current working directory.',
         contextInput: targetPathInput,
       })
     );
   }
 
-  if (node.type !== FsNodeType.File) {
+  if (node.type === FsNodeType.Symlink) {
     return err(
       createAppError({
-        code: ErrorCode.NotADirectory,
+        code: ErrorCode.PathTraversalBlocked,
+        domain: ErrorDomain.Filesystem,
+        severity: ErrorSeverity.SecurityBlock,
+        title: 'Symlink Escape Blocked (SAC_FS_ERR_PATH_ESCAPE)',
+        message: `Entry "${node.name}" is a symbolic link pointing to "${node.symlinkTarget}". Blocked by openat2(RESOLVE_NO_SYMLINKS) / openat(O_NOFOLLOW).`,
+        remediation: 'Symbolic links are strictly forbidden in the sandbox.',
+        cweReference: 'CWE-22',
+        contextInput: targetPathInput,
+      })
+    );
+  }
+
+  if (node.type === FsNodeType.Directory) {
+    return err(
+      createAppError({
+        code: ErrorCode.NotARegularFile,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.Warning,
-        title: 'Cannot Read Directory as File (EISDIR)',
-        message: `Path "${targetPath}" is a directory.`,
-        remediation: 'Navigate into the directory to view its entries.',
+        title: 'Cannot Read Directory as Regular File (SAC_FS_ERR_NOT_REGULAR)',
+        message: `Path "${targetPath}" is a directory (!S_ISREG(sb.st_mode)).`,
+        remediation: 'Use "ls" or click the directory to list its entries.',
+        contextInput: targetPathInput,
+      })
+    );
+  }
+
+  if (node.permissionsOctal === '0000') {
+    return err(
+      createAppError({
+        code: ErrorCode.PermissionDenied,
+        domain: ErrorDomain.Filesystem,
+        severity: ErrorSeverity.SecurityBlock,
+        title: 'Permission Denied (SAC_FS_ERR_PERMISSION_DENIED)',
+        message: `File "${targetPath}" has mode ${node.permissionsOctal} (${node.owner}) and returned EACCES.`,
+        remediation: 'Only files readable by the unprivileged daemon UID can be accessed.',
+        cweReference: 'CWE-285',
         contextInput: targetPathInput,
       })
     );
@@ -376,26 +487,49 @@ export const createSandboxAuditNote = (
   contentInput: string
 ): Result<SandboxFsState, AppError> => {
   const cleanName = fileNameInput.trim();
-  if (!/^[a-zA-Z0-9._-]{1,48}$/.test(cleanName) || cleanName === '..' || cleanName === '.') {
+  if (
+    !/^[a-zA-Z0-9._-]{1,48}$/.test(cleanName) ||
+    cleanName === '..' ||
+    cleanName === '.'
+  ) {
     return err(
       createAppError({
         code: ErrorCode.InvalidFilename,
+        domain: ErrorDomain.Filesystem,
         severity: ErrorSeverity.Warning,
         title: 'Invalid Sandboxed Filename',
         message: `Filename "${cleanName}" must contain only alphanumeric characters, dots, hyphens, or underscores (1–48 chars).`,
-        remediation: 'Provide a simple filename such as "audit_note.txt" without path separators.',
+        remediation:
+          'Provide a simple filename such as "audit_note.txt" without path separators.',
+        contextInput: fileNameInput,
+      })
+    );
+  }
+
+  if (contentInput.length >= 4096) {
+    return err(
+      createAppError({
+        code: ErrorCode.BufferTooSmall,
+        domain: ErrorDomain.Filesystem,
+        severity: ErrorSeverity.Warning,
+        title: 'Payload Exceeds SAC_MAX_PAYLOAD_LEN (SAC_FS_ERR_BUFFER_TOO_SMALL)',
+        message: `Content length (${contentInput.length} B) exceeds the 4096-byte buffer cap.`,
+        remediation: 'Keep note content under 4,095 bytes.',
         contextInput: fileNameInput,
       })
     );
   }
 
   const fullPath = `${state.currentDir}/${cleanName}`;
-  const resolvedCheck = resolveSandboxedPath(state.currentDir, fullPath, state.jailRoot);
+  const resolvedCheck = resolveSandboxedPath(
+    state.currentDir,
+    fullPath,
+    state.jailRoot
+  );
   if (resolvedCheck.tag === 'ERR') {
     return resolvedCheck;
   }
 
-  const normalizedContent = contentInput.slice(0, 4096);
   const newNode: VirtualFsNode = Object.freeze({
     path: resolvedCheck.value,
     name: cleanName,
@@ -403,10 +537,10 @@ export const createSandboxAuditNote = (
     type: FsNodeType.File,
     permissionsOctal: '0640',
     owner: 'secadmin:secadmin',
-    sizeBytes: normalizedContent.length,
+    sizeBytes: contentInput.length,
     modifiedIso: new Date().toISOString(),
-    sha256Short: computePseudoDigest(normalizedContent),
-    content: normalizedContent,
+    fnv1a64Hex: computeFnv1a64Hex(contentInput),
+    content: contentInput,
   });
 
   const filteredNodes = state.nodes.filter((n) => n.path !== newNode.path);

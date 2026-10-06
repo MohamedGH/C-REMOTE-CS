@@ -1,0 +1,6 @@
+{
+  "name": "SecAdminC — TLS Remote Administration & C11 Sandbox Workbench",
+  "description": "Defensive C11 OpenSSL client-server architecture, sandboxed remote file browser, allowlisted POSIX command console, security auditor, and functional test suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

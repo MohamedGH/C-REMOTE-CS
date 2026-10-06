@@ -346,14 +346,29 @@ export const executeAllFunctionalTests = (): TestSuiteSummary => {
     runSingleTest(
       'test_c_audit_01',
       'C11 Static Auditor',
-      'Static Security Verification of C11 Server & Sandbox Source',
-      'Scans C_SOURCE_FILES to confirm zero system()/popen()/gets()/strcpy() calls and active mTLS 1.3 + realpath() guards.',
+      'Static Security Verification of C11 Server, Client, Managers & Tests',
+      'Scans all 7 C_SOURCE_FILES to confirm zero system()/popen()/gets()/strcpy() calls and active mTLS 1.3 + realpath() guards.',
       () => {
         const findings = runStaticSecurityAudit(C_SOURCE_FILES);
         const allSafe = findings.every((f) => f.status === 'VERIFIED_SAFE');
+        const hasMainInServer = C_SOURCE_FILES.some(
+          (f) => f.filename === 'tls_server.c' && f.code.includes('int main(')
+        );
+        const hasMainInClient = C_SOURCE_FILES.some(
+          (f) => f.filename === 'tls_client.c' && f.code.includes('int main(')
+        );
+        const hasCTestSuite = C_SOURCE_FILES.some(
+          (f) => f.filename === 'test_suite.c' && f.code.includes('int main(')
+        );
         return {
-          passed: allSafe && findings.length === 4,
-          details: `Verified ${findings.length}/4 static C security rules: ${findings.map((f) => `${f.ruleId}(${f.cwe})=${f.status}`).join(', ')}`,
+          passed:
+            allSafe &&
+            findings.length === 4 &&
+            C_SOURCE_FILES.length === 7 &&
+            hasMainInServer &&
+            hasMainInClient &&
+            hasCTestSuite,
+          details: `Verified ${C_SOURCE_FILES.length} C11 modules & ${findings.length}/4 static C security rules: ${findings.map((f) => `${f.ruleId}(${f.cwe})=${f.status}`).join(', ')}`,
         };
       }
     ),

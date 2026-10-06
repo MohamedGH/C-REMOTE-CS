@@ -100,7 +100,7 @@ export const createInitialAppState = (): AppState => {
     : Object.freeze([]);
 
   return Object.freeze({
-    route: createInitialRouteState(RouteId.Workspace),
+    route: createInitialRouteState(RouteId.CArchitecture),
     errorManager: createInitialErrorState(),
     tlsSession: isOk(bootCmd)
       ? bootCmd.value.nextSessionState
